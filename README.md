@@ -8,92 +8,15 @@ Azure Identity structure is expected to change.
 # Java
 ## Azure Core/Common
 ### Credentials Classes
-~~~ java
-package com.azure.common.credentials;
 
-    //This class already exists in azure core.
-    public class TokenCredentials implements ServiceClientCredentials {
-        /**
-         * The authentication scheme.
-         */
-        private String scheme;
+The current classes in Azure core are not correctly implemented in the way:
+1. The sync `ServiceClientCredentials` should not exist. 
+2. The async `AsyncServiceClientCredentials` doesn't provide the `resource` or `scopes` on the interface method. The credential is not able to get the resource reliably from the `HttpRequest` object passed in.
 
-        /**
-         * The secure token.
-         */
-        private String token;
-
-        /**
-         * Creates TokenCredentials.
-         *
-         * @param scheme scheme to use. If null, defaults to Bearer
-         * @param token  valid token
-         */
-        public TokenCredentials(String scheme, String token) {
-            if (scheme == null) {
-                scheme = "Bearer";
-            }
-            this.scheme = scheme;
-            this.token = token;
-        }
-
-        @Override
-        public String authorizationHeaderValue(String uri) throws IOException {
-            return scheme + " " + token;
-        }
-    }
-
-    //Doesn't exist in azure core yet, exists in KV Secrets API within SecretAsyncClientBuilder
-    public class AsyncTokenCredentials implements AsyncServiceClientCredentials {
-
-        private String scheme;
-        private Mono<String> token;
-
-        AsyncTokenCredentials(String scheme, Mono<String> token) {
-            this.scheme = scheme;
-            this.token = token;
-        }
-
-        @Override
-        public Mono<String> authorizationHeaderValueAsync(HttpRequest httpRequest) {
-            if (scheme == null) {
-                scheme = "Bearer";
-            }
-            return token.flatMap(tokenValue -> Mono.just("Bearer " + tokenValue));
-        }
-    }
-
-~~~
 ### Authentication Policies
-~~~ java
-package com.azure.common.http.policy;
 
-//The name is deceiving, but it does Authorization. It already exists in azure core/common for Java.
-public class CredentialsPolicy implements HttpPipelinePolicy {
-    private final ServiceClientCredentials credentials;
+They are abandoned too because they only work with the credentials classes in azure core today.
 
-    /**
-     * Creates CredentialsPolicy.
-     *
-     * @param credentials the credentials
-     */
-    public CredentialsPolicy(ServiceClientCredentials credentials) {
-        this.credentials = credentials;
-    }
-
-    @Override
-    public Mono<HttpResponse> process(HttpPipelineCallContext context, HttpPipelineNextPolicy next) {
-        try {
-            String token = credentials.authorizationHeaderValue(context.httpRequest().url().toString());
-            context.httpRequest().headers().set("Authorization", token);
-            return next.process();
-        } catch (IOException e) {
-            return Mono.error(e);
-        }
-    }
-}
-
-~~~
 ## Azure Identity
 The azure com.azure.identity package provides implementations for Active Directory based OAuth token authentication.  It provides an abstraction above the authentication libraries provided by the Azure Identity team.  It also provides mechanisms for querying credential information from the environment.
 
@@ -101,23 +24,24 @@ The azure com.azure.identity package provides implementations for Active Directo
 ~~~ java
 package com.azure.identity;
 
+    public abstract class TokenCredential {
+        public abstract Mono<String> getTokenAsync(String resource);
+    }
+
     // Use Fluent Pattern During Implementation
     //This is the package with most implementation needed.
     // Scott had the methods Static in his framework -- check the need and usage for it.
-    public abstract class AzureCredential extends AsyncTokenCredentials {
-        private AzureCredential(HttpPipelinePolicy policies) {
-            client = getDefaultClient();
-        }
-
+    public abstract class AzureCredential extends TokenCredential {
+        public static final AzureCredential DEFAULT; //
         public List<HttpPipelinePolicy> createDefaultPipelinePolicies();
     }
 
     public class ClientSecretCredential extends AzureCredential {
-        public ClientSecretCredential(String clientId, String clientSecret, String authority);
-        public ClientSecretCredential(String clientId, String clientSecret, String authority, List<HttpPipelinePolicy> policies);
+        public ClientSecretCredential(String clientId, String clientSecret, String tenant);
+        public ClientSecretCredential(String clientId, String clientSecret, String tenant, String aadEndpoint);
 
         @Override
-        public Mono<String> authorizationHeaderValueAsync(HttpRequest httpRequest);
+        public Mono<String> getTokenAsync(String resource);
     }
 
     //Not in focus for now.
@@ -136,34 +60,30 @@ package com.azure.identity;
 package com.azure.identity;
 
     //Use Fluent Pattern during implementation
-    public class TokenCredentialProvider extends AsyncTokenCredentials {
-        protected TokenCredentialProvider();
+    public class TokenCredentialProvider {
+        private final List<TokenCredentialProvider> providers;
 
-        public TokenCredentialProvider(TokenCredentialProvider... credentialProviders);
+        protected TokenCredentialProvider();
+        public TokenCredentialProvider(List<TokenCredentialProvider> providers);
+        public TokenCredentialProvider(TokenCredentialProvider... providers);
+
+        public TokenCredential getCredential() throws CredentialNotFoundException;
+        public Mono<String> getTokenAsync(String resource) throws CredentialNotFoundException;
+    }
+
+    public class EnvironmentCredentialProvider extends TokenCredentialProvider {
+        public EnvironmentCredentialProvider();
 
         @Override
-        public Mono<String> authorizationHeaderValueAsync(HttpRequest httpRequest); // full implementation
-
-
-        // iterates through the chain of credential providers to find one which returns a credential if none
-        // return credential raise exception (full chain on stack)
-        protected Mono<TokenCredential> getCredential(HttpRequest httpRequest);
+        public TokenCredential getCredential();
     }
-
-    public class EnvironmentCredentialProvider extends TokenCredentialProvider
-    {
-        public EnvironmentCredentialProvider(List<HttpPipelinePolicy> policies);
-        
-        // if available return cred
-        protected Mono<TokenCredential> getCredential(HttpRequest httpRequest);  // full implementation
-    }
-
+    
     //
     public class MsiCredentialProvider extends TokenCredentialProvider {
         public MsiCredentialProvider(List<HttpPipelinePolicy> policies);
 
         // if available return cred
-        protected Mono<TokenCredential> getCredential(HttpRequest httpRequest);  // full implementation
+        protected Mono<TokenCredential> getCredential() throws CredentialNotFoundException;  // full implementation
     }    
 ~~~
 
@@ -173,21 +93,21 @@ package com.azure.keyvault
 
 
     //This exists in Secrets API, accepts AsyncServiceClientCredentials for async client, ServiceClientCredentials for sync client
-     public final class SecretAsyncClientBuilder {
+     public final class SecretClientBuilder {
         private final List<HttpPipelinePolicy> policies;
-        private AsyncServiceClientCredentials credentials;
+        private TokenCredential credential;
         private HttpPipeline pipeline;
         private URL vaultEndpoint;
         private HttpClient httpClient;
         private HttpLogDetailLevel httpLogDetailLevel;
         private RetryPolicy retryPolicy;
 
-        SecretAsyncClientBuilder() {
+        SecretClientBuilder() {
             retryPolicy = new RetryPolicy();
             httpLogDetailLevel = HttpLogDetailLevel.NONE;
             policies = new ArrayList<>();
         }
-        public SecretAsyncClient build() {
+        public SecretClient build() {
 
             if (vaultEndpoint == null) {
                 throw new IllegalStateException(KeyVaultErrorCodeStrings.getErrorString(KeyVaultErrorCodeStrings.VAULT_END_POINT_REQUIRED));
@@ -204,7 +124,7 @@ package com.azure.keyvault
             final List<HttpPipelinePolicy> policies = new ArrayList<>();
             policies.add(new UserAgentPolicy(AzureKeyVaultConfiguration.SDK_NAME, AzureKeyVaultConfiguration.SDK_VERSION));
             policies.add(retryPolicy);
-            policies.add(new AsyncCredentialsPolicy(getAsyncTokenCredentials()));
+            policies.add(new KeyVaultCredentialPolicy(credentials));
             policies.addAll(this.policies);
             policies.add(new HttpLoggingPolicy(httpLogDetailLevel));
 
@@ -223,9 +143,9 @@ package com.azure.keyvault
 
   //Using ClientSecretCredential
   //Use Fluent Pattern for SecretCredentials or Providers.
-  SecretAsyncClient.builder()
-    .vaultEndpoint("https://myvault.vault.azure.net/")
-    .credentials(new ClientSecretCredential(getClientId(), getClientSecret(), getAuthority()))
-    .build();
+    SecretClient client = new SecretClientBuilder()
+        .vaultEndpoint("https://myvault.vault.azure.net")
+        .credentials(AzureCredential.DEFAULT)
+        .build();
 
 ~~~
