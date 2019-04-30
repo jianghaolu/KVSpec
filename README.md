@@ -12,6 +12,26 @@ Azure Identity structure is expected to change.
 The current classes in Azure core are not correctly implemented in the way:
 1. The sync `ServiceClientCredentials` should not exist. 
 2. The async `AsyncServiceClientCredentials` doesn't provide the `resource` or `scopes` on the interface method. The credential is not able to get the resource reliably from the `HttpRequest` object passed in.
+3. The credentials classes are trying to do more than authentication. They are also trying to modify the HttpRequest, which should be done by an accompanying pipeline policy.
+
+Redesigned credentials: (for now we are using resource instead of scopes)
+
+~~~ java
+package com.azure.identity;
+
+    // This is the base of every possible credential in our core, supporting all type of credentials that generate a bunch of headers
+    public abstract class Credential {
+        public abstract Mono<HttpHeaders> getAuthenticationHeadersAsync(String resource, HttpRequest request); // ideally request is immutable
+    }
+    
+    // This is a special type of Credential that writes a header "Authorization: {scheme} {token}"
+    public abstract class TokenCredential {
+        public TokenCredential(String scheme);
+        public abstract Mono<String> getTokenAsync(String resource);
+        // call getTokenAsync() in implementation of getAuthenticationHeadersAsync(String, HttpRequest);
+    }  
+
+~~~
 
 ### Authentication Policies
 
@@ -23,10 +43,6 @@ The azure com.azure.identity package provides implementations for Active Directo
 ### Credential Implementations
 ~~~ java
 package com.azure.identity;
-
-    public abstract class TokenCredential {
-        public abstract Mono<String> getTokenAsync(String resource);
-    }
 
     // Use Fluent Pattern During Implementation
     //This is the package with most implementation needed.
